@@ -1,0 +1,28 @@
+# Datasets
+datasets/
+
+# Trained models
+saved_models/
+
+# Logs
+logs/
+
+# Python
+__pycache__/
+*.pyc
+
+# HuggingFace checkpoints
+checkpoint-*/
+*.bin
+*.safetensors
+*.pth
+
+# Results
+results/*.csv
+
+# Virtual environment
+venv/
+.venv/
+
+artifacts/train.csv
+artifacts/test.csv

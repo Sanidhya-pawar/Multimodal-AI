@@ -1,0 +1,7 @@
+{
+    "vocab_size": 20000,
+    "max_length": 100,
+    "embedding_dim": 128,
+    "hidden_dim": 128,
+    "random_state": 42
+}
