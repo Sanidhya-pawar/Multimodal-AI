@@ -19,6 +19,10 @@ checkpoint-*/
 
 # Results
 results/*.csv
+results/
+*.pth
+*.safetensors
+*.bin
 
 # Virtual environment
 venv/
