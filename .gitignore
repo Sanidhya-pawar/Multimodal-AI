@@ -6,6 +6,8 @@ saved_models/
 
 # Logs
 logs/
+catboost_info/
+
 
 # Python
 __pycache__/
@@ -23,6 +25,8 @@ results/
 *.pth
 *.safetensors
 *.bin
+*.pkl
+
 
 # Virtual environment
 venv/
