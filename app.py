@@ -6,6 +6,7 @@ import librosa
 import numpy as np
 import tempfile
 import joblib
+import cv2
 
 from PIL import Image
 from collections import Counter
@@ -71,6 +72,18 @@ TABULAR_FEATURES = [
     "fbs", "restecg", "thalach", "exang",
     "oldpeak", "slope", "ca", "thal"
 ]
+
+# ==========================================
+# VIDEO CONFIG
+# ==========================================
+
+VIDEO_CLASSES = [
+    "NonViolence",
+    "Violence"
+]
+
+NUM_FRAMES = 12
+VIDEO_IMAGE_SIZE = 112
 
 # ==========================================
 # LOAD TEXT DATA + VOCAB
@@ -205,6 +218,110 @@ class AudioCNN(nn.Module):
         return x
 
 # ==========================================
+# VIDEO CNN + LSTM MODEL
+# ==========================================
+
+class VideoCNNLSTM(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.cnn = nn.Sequential(
+            nn.Conv2d(3, 32, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+
+            nn.Conv2d(32, 64, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+
+            nn.Conv2d(64, 128, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2)
+        )
+
+        self.feature_size = 128 * 14 * 14
+
+        self.lstm = nn.LSTM(
+            input_size=self.feature_size,
+            hidden_size=128,
+            batch_first=True
+        )
+
+        self.fc = nn.Linear(128, len(VIDEO_CLASSES))
+
+    def forward(self, x):
+        batch_size, seq_len, c, h, w = x.size()
+
+        x = x.view(
+            batch_size * seq_len,
+            c,
+            h,
+            w
+        )
+
+        features = self.cnn(x)
+
+        features = features.view(
+            batch_size,
+            seq_len,
+            -1
+        )
+
+        _, (hidden, _) = self.lstm(features)
+
+        output = self.fc(hidden[-1])
+
+        return output
+
+# ==========================================
+# VIDEO MOBILENET + LSTM MODEL
+# ==========================================
+
+class VideoMobileNetLSTM(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        mobilenet = models.mobilenet_v2(weights=None)
+
+        self.feature_extractor = mobilenet.features
+
+        self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+
+        self.lstm = nn.LSTM(
+            input_size=1280,
+            hidden_size=128,
+            batch_first=True
+        )
+
+        self.fc = nn.Linear(128, len(VIDEO_CLASSES))
+
+    def forward(self, x):
+        batch_size, seq_len, c, h, w = x.size()
+
+        x = x.view(
+            batch_size * seq_len,
+            c,
+            h,
+            w
+        )
+
+        features = self.feature_extractor(x)
+
+        features = self.avg_pool(features)
+
+        features = features.view(
+            batch_size,
+            seq_len,
+            -1
+        )
+
+        _, (hidden, _) = self.lstm(features)
+
+        output = self.fc(hidden[-1])
+
+        return output
+
+# ==========================================
 # LOAD ALL MODELS
 # ==========================================
 
@@ -288,6 +405,28 @@ def load_models():
         "saved_models/catboost.pkl"
     )
 
+    video_cnn_lstm = VideoCNNLSTM()
+    video_cnn_checkpoint = torch.load(
+        "saved_models/video_cnn_lstm.pth",
+        map_location=DEVICE
+    )
+    video_cnn_lstm.load_state_dict(
+        video_cnn_checkpoint["model_state_dict"]
+    )
+    video_cnn_lstm.to(DEVICE)
+    video_cnn_lstm.eval()
+
+    video_mobilenet_lstm = VideoMobileNetLSTM()
+    video_mobile_checkpoint = torch.load(
+        "saved_models/video_mobilenet_lstm.pth",
+        map_location=DEVICE
+    )
+    video_mobilenet_lstm.load_state_dict(
+        video_mobile_checkpoint["model_state_dict"]
+    )
+    video_mobilenet_lstm.to(DEVICE)
+    video_mobilenet_lstm.eval()
+
     return (
         bilstm,
         bert_tokenizer,
@@ -299,7 +438,9 @@ def load_models():
         wav2vec_model,
         random_forest,
         xgboost_model,
-        catboost_model
+        catboost_model,
+        video_cnn_lstm,
+        video_mobilenet_lstm
     )
 
 
@@ -314,7 +455,9 @@ def load_models():
     wav2vec_model,
     random_forest,
     xgboost_model,
-    catboost_model
+    catboost_model,
+    video_cnn_lstm,
+    video_mobilenet_lstm
 ) = load_models()
 
 # ==========================================
@@ -543,6 +686,116 @@ def predict_tabular(model, data):
     return label, confidence
 
 # ==========================================
+# VIDEO PREDICTION
+# ==========================================
+
+def load_video_frames(video_path):
+
+    cap = cv2.VideoCapture(video_path)
+
+    total_frames = int(
+        cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    )
+
+    if total_frames <= 0:
+        cap.release()
+
+        return torch.zeros(
+            NUM_FRAMES,
+            3,
+            VIDEO_IMAGE_SIZE,
+            VIDEO_IMAGE_SIZE
+        )
+
+    frame_indices = np.linspace(
+        0,
+        total_frames - 1,
+        NUM_FRAMES
+    ).astype(int)
+
+    frames = []
+
+    for frame_idx in frame_indices:
+
+        cap.set(
+            cv2.CAP_PROP_POS_FRAMES,
+            frame_idx
+        )
+
+        success, frame = cap.read()
+
+        if not success:
+            frame = np.zeros(
+                (
+                    VIDEO_IMAGE_SIZE,
+                    VIDEO_IMAGE_SIZE,
+                    3
+                ),
+                dtype=np.uint8
+            )
+        else:
+            frame = cv2.cvtColor(
+                frame,
+                cv2.COLOR_BGR2RGB
+            )
+
+            frame = cv2.resize(
+                frame,
+                (
+                    VIDEO_IMAGE_SIZE,
+                    VIDEO_IMAGE_SIZE
+                )
+            )
+
+        frame = frame / 255.0
+
+        frame = np.transpose(
+            frame,
+            (
+                2,
+                0,
+                1
+            )
+        )
+
+        frames.append(frame)
+
+    cap.release()
+
+    frames = np.array(
+        frames,
+        dtype=np.float32
+    )
+
+    return torch.tensor(
+        frames,
+        dtype=torch.float32
+    )
+
+
+def predict_video(model, video_path):
+    frames = load_video_frames(video_path)
+
+    frames = frames.unsqueeze(0).to(DEVICE)
+
+    with torch.no_grad():
+        outputs = model(frames)
+
+        probs = torch.softmax(
+            outputs,
+            dim=1
+        )
+
+        confidence, pred = torch.max(
+            probs,
+            dim=1
+        )
+
+    label = VIDEO_CLASSES[pred.item()]
+
+    return label, confidence.item()
+
+# ==========================================
 # UI
 # ==========================================
 
@@ -558,6 +811,7 @@ page = st.sidebar.radio(
         "Image Classification",
         "Audio Classification",
         "Heart Disease Prediction",
+        "Video Violence Detection",
         "Model Comparison"
     ]
 )
@@ -572,7 +826,7 @@ if page == "Home":
     st.write(
         """
         This platform compares machine learning and deep learning models
-        across multiple data modalities: Text, Image, Audio, and Tabular data.
+        across multiple data modalities: Text, Image, Audio, Tabular, and Video.
         """
     )
 
@@ -582,6 +836,7 @@ if page == "Home":
     st.write("✅ Image Module: CNN and ResNet50")
     st.write("✅ Audio Module: Audio CNN and Wav2Vec2")
     st.write("✅ Tabular Module: Random Forest, XGBoost, and CatBoost")
+    st.write("✅ Video Module: CNN+LSTM and MobileNetV2+LSTM")
     st.write("✅ Evaluation Metrics and Model Comparison")
 
     st.info(f"Running on device: {DEVICE}")
@@ -931,6 +1186,97 @@ elif page == "Heart Disease Prediction":
             )
 
 # ==========================================
+# VIDEO PAGE
+# ==========================================
+
+elif page == "Video Violence Detection":
+    st.header("🎥 Video Violence Detection")
+
+    uploaded_video = st.file_uploader(
+        "Upload a video file",
+        type=[
+            "mp4",
+            "avi"
+        ]
+    )
+
+    model_choice = st.selectbox(
+        "Select Video Model",
+        [
+            "CNN + LSTM",
+            "MobileNetV2 + LSTM",
+            "Compare Both"
+        ]
+    )
+
+    if uploaded_video is not None:
+        st.video(uploaded_video)
+
+        if st.button("Predict Video"):
+            suffix = ".mp4"
+
+            if uploaded_video.name.lower().endswith(".avi"):
+                suffix = ".avi"
+
+            with tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=suffix
+            ) as temp_video:
+                temp_video.write(uploaded_video.getvalue())
+                temp_video_path = temp_video.name
+
+            if model_choice == "CNN + LSTM":
+                label, conf = predict_video(
+                    video_cnn_lstm,
+                    temp_video_path
+                )
+
+                st.success(
+                    f"CNN + LSTM Prediction: {label} ({conf:.4f})"
+                )
+
+            elif model_choice == "MobileNetV2 + LSTM":
+                label, conf = predict_video(
+                    video_mobilenet_lstm,
+                    temp_video_path
+                )
+
+                st.success(
+                    f"MobileNetV2 + LSTM Prediction: {label} ({conf:.4f})"
+                )
+
+            else:
+                cnn_result = predict_video(
+                    video_cnn_lstm,
+                    temp_video_path
+                )
+
+                mobile_result = predict_video(
+                    video_mobilenet_lstm,
+                    temp_video_path
+                )
+
+                results = pd.DataFrame({
+                    "Model": [
+                        "CNN + LSTM",
+                        "MobileNetV2 + LSTM"
+                    ],
+                    "Prediction": [
+                        cnn_result[0],
+                        mobile_result[0]
+                    ],
+                    "Confidence": [
+                        cnn_result[1],
+                        mobile_result[1]
+                    ]
+                })
+
+                st.dataframe(
+                    results,
+                    use_container_width=True
+                )
+
+# ==========================================
 # MODEL COMPARISON
 # ==========================================
 
@@ -1021,3 +1367,22 @@ elif page == "Model Comparison":
 
     except Exception:
         st.info("Tabular metrics file not found. Run src/tabular/evaluate.py first.")
+
+    st.subheader("Video Model Metrics")
+
+    try:
+        video_metrics = pd.read_csv(
+            "results/video_metrics.csv"
+        )
+
+        st.dataframe(
+            video_metrics,
+            use_container_width=True
+        )
+
+        st.bar_chart(
+            video_metrics.set_index("Model")["Accuracy"]
+        )
+
+    except Exception:
+        st.info("Video metrics file not found. Run src/video/evaluate.py first.")
